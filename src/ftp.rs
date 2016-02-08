@@ -176,10 +176,11 @@ impl FtpStream {
 	}
 
 	/// Quits the current FTP session.
-	pub fn quit(&mut self) -> Result<(isize, String)> {
+	pub fn quit(&mut self) -> Result<()> {
 		let quit_command = format!("QUIT\r\n");
 		try!(self.write_str(&quit_command));
-		self.read_response(221)
+		try!(self.read_response(221));
+		Ok(())
 	}
 
 	/// Retrieves the file name specified from the server. This method is a more complicated way to retrieve a file. The reader returned should be dropped.
