@@ -29,7 +29,7 @@ fn test_ftp(addr: &str, user: &str, pass: &str) -> Result<()> {
 
 fn main() {
 	test_ftp("127.0.0.1", "Doe", "mumble").unwrap_or_else(|err|
-		panic!(err)
+		panic!("{}", err)
 	);
 	println!("test successful")
 }

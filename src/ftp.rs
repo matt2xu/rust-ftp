@@ -9,10 +9,9 @@
 //!
 //! ```rust
 //! use ftp::FtpStream;
-//! let mut ftp_stream = match FtpStream::connect("127.0.0.1", 21) {
-//!   Ok(s) => s,
-//!   Err(e) => panic!("{}", e)
-//! };
+//! let mut ftp_stream = FtpStream::connect("127.0.0.1", 21).unwrap_or_else(|err|
+//!     panic!("{}", err)
+//! );
 //! let _ = ftp_stream.quit();
 //! ```
 //!
