@@ -138,31 +138,35 @@ impl FtpStream {
         };
         Ok(plain_ftp_stream)
     }
-    
-    /// Execute command which send data back in a separate stream
-    #[cfg(not(feature = "secure"))]
-    fn data_command(&mut self, cmd: &str) -> Result<DataStream> {
-        self.pasv()
-            .and_then(|addr| self.write_str(cmd).map(|_| addr))
-            .and_then(|addr| TcpStream::connect(addr)
-                      .map_err(|e| FtpError::ConnectionError(e)))
-            .map(|stream| DataStream::Tcp(stream))
-    }
 
-    /// Execute command which send data back in a separate stream
-    #[cfg(feature = "secure")]
-    fn data_command(&mut self, cmd: &str) -> Result<DataStream> {
+    fn open_data_connection(&mut self, cmd: &str) -> Result<TcpStream> {
         self.pasv()
             .and_then(|addr| self.write_str(cmd).map(|_| addr))
             .and_then(|addr| TcpStream::connect(addr).map_err(|e| FtpError::ConnectionError(e)))
             .and_then(|stream| {
+                self.read_response_in(&[status::ABOUT_TO_SEND, status::ALREADY_OPEN])
+                .map(|_| stream)
+            })
+    }
+
+    /// Execute command which send data back in a separate stream
+    #[cfg(not(feature = "secure"))]
+    fn data_command(&mut self, cmd: &str) -> Result<BufReader<DataStream>> {
+        self.open_data_connection(cmd).map(|stream| BufReader::new(DataStream::Tcp(stream)))
+    }
+
+    /// Execute command which send data back in a separate stream
+    #[cfg(feature = "secure")]
+    fn data_command(&mut self, cmd: &str) -> Result<BufReader<DataStream>> {
+        self.open_data_connection(cmd)
+            .and_then(|stream| {
                 match self.ssl_cfg {
                     Some(ref ssl) => {
                         SslStream::connect(ssl.clone(), stream)
-                            .map(|stream| DataStream::Ssl(stream))
+                            .map(|stream| BufReader::new(DataStream::Ssl(stream)))
                             .map_err(|e| FtpError::SecureError(e.description().to_owned()))
                     },
-                    None => Ok(DataStream::Tcp(stream))
+                    None => Ok(BufReader::new(DataStream::Tcp(stream)))
                 }
             })
     }
@@ -281,9 +285,7 @@ impl FtpStream {
     /// The reader returned should be dropped.
     /// Also you will have to read the response to make sure it has the correct value.
     pub fn get(&mut self, file_name: &str) -> Result<BufReader<DataStream>> {
-        let retr_command = format!("RETR {}\r\n", file_name);
-        let data_stream = BufReader::new(try!(self.data_command(&retr_command)));
-        self.read_response(status::ABOUT_TO_SEND).map(|_| data_stream)
+        self.data_command(&format!("RETR {}\r\n", file_name))
     }
 
     /// Renames the file from_name to to_name
@@ -318,13 +320,10 @@ impl FtpStream {
     /// ```
     pub fn retr<F, T>(&mut self, filename: &str, reader: F) -> Result<T>
     where F: Fn(&mut Read) -> Result<T> {
-        let retr_command = format!("RETR {}\r\n", filename);
-        {
-            let mut data_stream = BufReader::new(try!(self.data_command(&retr_command)));
-            self.read_response_in(&[status::ABOUT_TO_SEND, status::ALREADY_OPEN])
-                .and_then(|_| reader(&mut data_stream))
-        }.and_then(|res|
-            self.read_response(status::CLOSING_DATA_CONNECTION).map(|_| res))
+        self.get(filename)
+            .and_then(|mut data_stream| reader(&mut data_stream))
+            .and_then(|res|
+                self.read_response(status::CLOSING_DATA_CONNECTION).map(|_| res))
     }
 
     /// Simple way to retr a file from the server. This stores the file in memory.
@@ -361,27 +360,20 @@ impl FtpStream {
         self.read_response(status::REQUESTED_FILE_ACTION_OK).map(|_| ())
     }
 
-    fn put_file<R: Read>(&mut self, filename: &str, r: &mut R) -> Result<()> {
-        let stor_command = format!("STOR {}\r\n", filename);
-        let mut data_stream = BufWriter::new(try!(self.data_command(&stor_command)));
-        try!(self.read_response_in(&[status::ALREADY_OPEN, status::ABOUT_TO_SEND]));
-        copy(r, &mut data_stream)
-            .map_err(|read_err| FtpError::ConnectionError(read_err))
-            .map(|_| ())
-    }
-
     /// This stores a file on the server.
-    pub fn put<R: Read>(&mut self, filename: &str, r: &mut R) -> Result<()> {
-        try!(self.put_file(filename, r));
-        self.read_response(status::CLOSING_DATA_CONNECTION).map(|_| ())
+    pub fn put<R: Read>(&mut self, filename: &str, reader: &mut R) -> Result<()> {
+        let stor_command = format!("STOR {}\r\n", filename);
+        self.data_command(&stor_command).and_then(|data_stream| {
+            let mut writer = BufWriter::new(data_stream.into_inner());
+            copy(reader, &mut writer).map_err(|e| FtpError::ConnectionError(e))
+        }).and_then(|_| self.read_response(status::CLOSING_DATA_CONNECTION).map(|_| ()))
     }
 
     /// Execute a command which returns list of strings in a separate stream
-    fn list_command(&mut self, cmd: Cow<'static, str>, open_code: u32, close_code: u32) -> Result<Vec<String>> {
+    fn list_command(&mut self, cmd: Cow<'static, str>) -> Result<Vec<String>> {
         let mut lines: Vec<String> = Vec::new();
         {
-            let mut data_stream = BufReader::new(try!(self.data_command(&cmd)));
-            try!(self.read_response_in(&[open_code, status::ALREADY_OPEN]));
+            let mut data_stream = try!(self.data_command(&cmd));
 
             let mut line = String::new();
             loop {
@@ -393,7 +385,7 @@ impl FtpStream {
             }
         }
 
-        self.read_response(close_code).map(|_| lines)
+        self.read_response(status::CLOSING_DATA_CONNECTION).map(|_| lines)
     }
 
     /// Execute `LIST` command which returns the detailed file listing in human readable format.
@@ -401,8 +393,7 @@ impl FtpStream {
     /// returned otherwise it will the list of files on `pathname`.
     pub fn list(&mut self, pathname: Option<&str>) -> Result<Vec<String>> {
         let command = pathname.map_or("LIST\r\n".into(), |path| format!("LIST {}\r\n", path).into());
-
-        self.list_command(command, status::ABOUT_TO_SEND, status::CLOSING_DATA_CONNECTION)
+        self.list_command(command)
     }
 
     /// Execute `NLST` command which returns the list of file names only.
@@ -410,8 +401,7 @@ impl FtpStream {
     /// returned otherwise it will the list of files on `pathname`.
     pub fn nlst(&mut self, pathname: Option<&str>) -> Result<Vec<String>> {
         let command = pathname.map_or("NLST\r\n".into(), |path| format!("NLST {}\r\n", path).into());
-
-        self.list_command(command, status::ABOUT_TO_SEND, status::CLOSING_DATA_CONNECTION)
+        self.list_command(command)
     }
 
     /// Retrieves the modification time of the file at `pathname` if it exists.
