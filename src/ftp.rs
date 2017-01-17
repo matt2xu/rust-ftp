@@ -371,21 +371,13 @@ impl FtpStream {
 
     /// Execute a command which returns list of strings in a separate stream
     fn list_command(&mut self, cmd: Cow<'static, str>) -> Result<Vec<String>> {
-        let mut lines: Vec<String> = Vec::new();
-        {
-            let mut data_stream = try!(self.data_command(&cmd));
-
-            let mut line = String::new();
-            loop {
-                match data_stream.read_to_string(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => lines.extend(line.split("\r\n").into_iter().map(|s| String::from(s)).filter(|s| s.len() > 0)),
-                    Err(err) => return Err(FtpError::ConnectionError(err)),
-                };
-            }
-        }
-
-        self.read_response(status::CLOSING_DATA_CONNECTION).map(|_| lines)
+        self.data_command(&cmd).and_then(|data_stream|
+            data_stream.lines()
+                // filter out empty lines. map_or takes default: true to propagate errors
+                .filter(|line| line.as_ref().ok().map_or(true, |line| !line.is_empty()))
+                .collect::<::std::io::Result<_>>()
+                .map_err(|e| FtpError::ConnectionError(e))
+        ).and_then(|lines| self.read_response(status::CLOSING_DATA_CONNECTION).map(|_| lines))
     }
 
     /// Execute `LIST` command which returns the detailed file listing in human readable format.
