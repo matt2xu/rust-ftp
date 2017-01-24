@@ -83,8 +83,8 @@ impl FtpStream {
     /// // Create an SslContext with a custom cert.
     /// let mut ctx = SslContext::new(SslMethod::Sslv23).unwrap();
     /// let _ = ctx.set_CA_file("/path/to/a/cert.pem").unwrap();
-    /// let mut ftp_stream = FtpStream::connect("127.0.0.1:21").unwrap();
-    /// let mut ftp_stream = ftp_stream.into_secure(&ctx).unwrap();
+    /// let ftp_stream = FtpStream::connect("127.0.0.1:21").unwrap();
+    /// let _ftp_stream = ftp_stream.into_secure(&ctx).unwrap();
     /// ```
     #[cfg(feature = "secure")]
     pub fn into_secure<T: IntoSsl + Clone>(mut self, ssl: T) -> Result<FtpStream> {
@@ -119,8 +119,8 @@ impl FtpStream {
     /// // Create an SslContext with a custom cert.
     /// let mut ctx = SslContext::new(SslMethod::Sslv23).unwrap();
     /// let _ = ctx.set_CA_file("/path/to/a/cert.pem").unwrap();
-    /// let mut ftp_stream = FtpStream::connect("127.0.0.1:21").unwrap();
-    /// let mut ftp_stream = ftp_stream.into_secure(&ctx).unwrap();
+    /// let ftp_stream = FtpStream::connect("127.0.0.1:21").unwrap();
+    /// let ftp_stream = ftp_stream.into_secure(&ctx).unwrap();
     /// // Do all secret things
     /// // Switch back to the insecure mode
     /// let mut ftp_stream = ftp_stream.into_insecure().unwrap();
@@ -174,7 +174,7 @@ impl FtpStream {
     /// Returns a reference to the underlying TcpStream.
     ///
     /// Example:
-    /// ```no_run
+    /// ```
     /// use std::net::TcpStream;
     ///
     /// let stream = FtpStream::connect("127.0.0.1:21")
@@ -329,7 +329,7 @@ impl FtpStream {
     /// Simple way to retr a file from the server. This stores the file in memory.
     ///
     /// ```
-    /// # use ftp::{FtpStream, FtpError};
+    /// # use ftp::FtpStream;
     /// # use std::io::Cursor;
     /// # let mut conn = FtpStream::connect("127.0.0.1:21").unwrap();
     /// # conn.login("Doe", "mumble").and_then(|_| {
@@ -383,16 +383,78 @@ impl FtpStream {
     /// Execute `LIST` command which returns the detailed file listing in human readable format.
     /// If `pathname` is omited then the list of files in the current directory will be
     /// returned otherwise it will the list of files on `pathname`.
-    pub fn list(&mut self, pathname: Option<&str>) -> Result<Vec<String>> {
-        let command = pathname.map_or("LIST\r\n".into(), |path| format!("LIST {}\r\n", path).into());
+    ///
+    /// If the `somedir` folder contains files `README.md` and `configure`, the following code:
+    ///
+    /// ```
+    /// # use ftp::FtpStream;
+    /// # use std::io::Cursor;
+    /// # let mut conn = FtpStream::connect("127.0.0.1:21").unwrap();
+    /// # conn.login("Doe", "mumble").unwrap();
+    /// # assert!(conn.mkdir("somedir").and_then(|_| conn.cwd("somedir")).is_ok());
+    /// # let mut reader = Cursor::new("hello, world!".as_bytes());
+    /// # assert!(conn.put("README.md", &mut reader).and_then(|_| conn.put("configure", &mut reader)).is_ok());
+    /// let mut anon = FtpStream::connect("127.0.0.1:21").unwrap();
+    /// anon.login("anonymous", "no password").unwrap();
+    ///
+    /// // list files in `somedir` folder
+    /// let files = anon.list("somedir").unwrap();
+    ///
+    /// // or change to `somedir` folder and list files in current folder
+    /// let files2 = anon.cwd("somedir").and_then(|_| anon.list(None)).unwrap();
+    ///
+    /// // make sure these are equivalent
+    /// assert_eq!(files, files2);
+    ///
+    /// // print files
+    /// for file in files {
+    ///     println!("{}", file);
+    /// }
+    /// # for file in conn.nlst(None).unwrap() { println!("{}", file); assert!(conn.rm(&file).is_ok()); }
+    /// # assert!(conn.cdup().and_then(|_| conn.rmdir("somedir")).is_ok());
+    /// ```
+    ///
+    /// produces the following output:
+    ///
+    /// ```text
+    /// -rw-r--r--    1 1000     109            13 Jan 24 14:59 README.md
+    /// -rw-r--r--    1 1000     109             0 Jan 24 14:59 configure
+    /// ```
+    pub fn list<'a, I: Into<Option<&'a str>>>(&mut self, pathname: I) -> Result<Vec<String>> {
+        let command = pathname.into().map_or("LIST\r\n".into(), |path| format!("LIST {}\r\n", path).into());
         self.list_command(command)
     }
 
     /// Execute `NLST` command which returns the list of file names only.
     /// If `pathname` is omited then the list of files in the current directory will be
     /// returned otherwise it will the list of files on `pathname`.
-    pub fn nlst(&mut self, pathname: Option<&str>) -> Result<Vec<String>> {
-        let command = pathname.map_or("NLST\r\n".into(), |path| format!("NLST {}\r\n", path).into());
+    ///
+    /// If the `anotherdir` folder contains files `README.md` and `configure`, the following code:
+    ///
+    /// ```
+    /// # use ftp::FtpStream;
+    /// # use std::io::Cursor;
+    /// # let mut conn = FtpStream::connect("127.0.0.1:21").unwrap();
+    /// # conn.login("Doe", "mumble").unwrap();
+    /// # assert!(conn.mkdir("anotherdir").and_then(|_| conn.cwd("anotherdir")).is_ok());
+    /// # let mut reader = Cursor::new("hello, world!".as_bytes());
+    /// # assert!(conn.put("README.md", &mut reader).and_then(|_| conn.put("configure", &mut reader)).is_ok());
+    /// let mut anon = FtpStream::connect("127.0.0.1:21").unwrap();
+    /// anon.login("anonymous", "no password").unwrap();
+    ///
+    /// // list files in `anotherdir` folder
+    /// let files = anon.nlst("anotherdir").unwrap();
+    /// // notice how file names begin with `anotherdir/` prefix.
+    /// assert_eq!(files, &["anotherdir/README.md", "anotherdir/configure"]);
+    ///
+    /// // change to `anotherdir` folder and list files in current folder
+    /// let files = anon.cwd("anotherdir").and_then(|_| anon.nlst(None)).unwrap();
+    /// assert_eq!(files, &["README.md", "configure"]);
+    /// # for file in files { assert!(conn.rm(&file).is_ok()); }
+    /// # assert!(conn.cdup().and_then(|_| conn.rmdir("anotherdir")).is_ok());
+    /// ```
+    pub fn nlst<'a, I: Into<Option<&'a str>>>(&mut self, pathname: I) -> Result<Vec<String>> {
+        let command = pathname.into().map_or("NLST\r\n".into(), |path| format!("NLST {}\r\n", path).into());
         self.list_command(command)
     }
 
